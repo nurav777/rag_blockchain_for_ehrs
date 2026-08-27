@@ -1,0 +1,29 @@
+# FastAPI & server
+fastapi>=0.115.0
+starlette>=0.41.0
+uvicorn[standard]
+
+# Database
+sqlalchemy
+aiosqlite
+
+# Auth & validation
+python-jose[cryptography]
+bcrypt
+python-multipart
+pydantic-settings
+email-validator
+
+# Blockchain
+web3
+
+# RAG & embeddings
+chromadb
+sentence-transformers
+pypdf
+
+# HTTP client (Ollama)
+httpx
+
+# Utilities
+python-dotenv

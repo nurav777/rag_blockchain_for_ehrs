@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+*.local
+
+# Data & uploads (never commit patient data)
+data/uploads/*
+data/chromadb/*
+!data/uploads/.gitkeep
+!data/chromadb/.gitkeep
+*.db
+*.sqlite3
+
+# Blockchain
+blockchain/besu/data/
+blockchain/besu/config-input/generated/
+blockchain/besu/config-input/output/
+blockchain/besu/config-input/network/
+blockchain/artifacts/
+blockchain/cache/
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

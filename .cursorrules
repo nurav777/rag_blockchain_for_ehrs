@@ -1,0 +1,14 @@
+We are building a blockchain-based medical record RAG system.
+
+Rules:
+
+- Build only one feature at a time.
+- Never generate more than one module.
+- Keep the code simple and modular.
+- Use FastAPI for backend.
+- Use React for frontend.
+- Use SQLite.
+- Use ChromaDB.
+- Use Hyperledger Besu.
+- Never store medical records on the blockchain.
+- Explain before making major architectural changes.
