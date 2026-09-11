@@ -2,15 +2,16 @@ from pydantic import BaseModel
 
 
 class MedicalRecordResponse(BaseModel):
-    id: int
-    patient_id: int
-    doctor_id: int
-    diagnosis: str
-    record_hash: str
-    file_path: str
-    ipfs_cid: str | None = None
-    tx_hash: str | None = None
-    ipfs_warning: str | None = None
-    blockchain_warning: str | None = None
+    """
+    Response returned after a medical record has been successfully
+    stored in IPFS and registered on the blockchain.
 
-    model_config = {"from_attributes": True}
+    The backend does not persist the medical record itself in SQLite
+    or on the local filesystem.
+    """
+
+    record_hash: str
+    ipfs_cid: str
+    tx_hash: str
+
+    indexing_warning: str | None = None

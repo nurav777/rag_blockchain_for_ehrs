@@ -1,69 +1,154 @@
+from __future__ import annotations
+
 from collections.abc import Generator
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
+
+
+# ============================================================
+# SQLALCHEMY BASE
+# ============================================================
 
 
 class Base(DeclarativeBase):
     pass
 
 
-def _ensure_sqlite_parent_dir(database_url: str) -> None:
+# ============================================================
+# DATABASE PATH
+# ============================================================
+
+
+def _normalize_database_url(
+    database_url: str,
+) -> str:
+    """
+    Normalize relative SQLite database paths against PROJECT_ROOT.
+
+    Example:
+
+        sqlite:///./data/medical_records.db
+
+    becomes:
+
+        sqlite:///F:/rag_blockchain_medical_records/data/medical_records.db
+
+    This prevents the database location from changing depending on
+    the directory from which Uvicorn is started.
+    """
+
     if not database_url.startswith("sqlite:///"):
-        return
-    db_path = Path(database_url.removeprefix("sqlite:///"))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+        return database_url
+
+    raw_path = database_url.removeprefix(
+        "sqlite:///"
+    )
+
+    db_path = Path(
+        raw_path
+    )
+
+    if not db_path.is_absolute():
+        db_path = (
+            PROJECT_ROOT
+            / db_path
+        ).resolve()
+    else:
+        db_path = db_path.resolve()
+
+    db_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return f"sqlite:///{db_path.as_posix()}"
 
 
-_ensure_sqlite_parent_dir(settings.DATABASE_URL)
+DATABASE_URL = _normalize_database_url(
+    settings.DATABASE_URL
+)
+
+
+# ============================================================
+# ENGINE
+# ============================================================
+
 
 connect_args = (
-    {"check_same_thread": False}
-    if settings.DATABASE_URL.startswith("sqlite")
+    {
+        "check_same_thread": False,
+    }
+    if DATABASE_URL.startswith(
+        "sqlite"
+    )
     else {}
 )
 
-engine = create_engine(settings.DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=connect_args,
+)
 
 
-def get_db() -> Generator[Session, None, None]:
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
+
+
+# ============================================================
+# DATABASE DEPENDENCY
+# ============================================================
+
+
+def get_db() -> Generator[
+    Session,
+    None,
+    None,
+]:
+    """
+    Provide a SQLAlchemy session for one FastAPI request.
+
+    SQLite is currently used for application identity data such as:
+
+        doctors
+        patients
+
+    Medical records themselves are NOT stored here.
+    """
+
     db = SessionLocal()
+
     try:
         yield db
+
     finally:
         db.close()
 
 
+# ============================================================
+# DATABASE INITIALIZATION
+# ============================================================
+
+
 def init_db() -> None:
-    from app.models import Doctor, MedicalRecord, Patient  # noqa: F401
+    """
+    Create application identity tables.
 
-    Base.metadata.create_all(bind=engine)
-    _ensure_medical_record_columns()
+    Only models imported here are registered with SQLAlchemy.
 
+    MedicalRecord is intentionally absent because medical records
+    are stored through IPFS + blockchain rather than SQLite.
+    """
 
-def _ensure_medical_record_columns() -> None:
-    if not settings.DATABASE_URL.startswith("sqlite"):
-        return
+    from app.models import Doctor, Patient  # noqa: F401
 
-    columns_to_add = {
-        "ipfs_cid": "VARCHAR(100)",
-        "tx_hash": "VARCHAR(66)",
-    }
-
-    with engine.connect() as connection:
-        columns = connection.exec_driver_sql("PRAGMA table_info(medical_records)").fetchall()
-        if not columns:
-            return
-
-        existing = {column[1] for column in columns}
-        for column_name, column_type in columns_to_add.items():
-            if column_name in existing:
-                continue
-            connection.exec_driver_sql(
-                f"ALTER TABLE medical_records ADD COLUMN {column_name} {column_type}"
-            )
-        connection.commit()
+    Base.metadata.create_all(
+        bind=engine
+    )
