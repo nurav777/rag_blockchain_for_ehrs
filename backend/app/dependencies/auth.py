@@ -1,35 +1,30 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
-from sqlalchemy.orm import Session
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.database import get_db
-from app.models.doctor import Doctor
-from app.services.auth_service import decode_access_token, get_doctor_by_id
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+from app.schemas.auth import WalletIdentity
+from app.services.auth_service import WalletAuthError, decode_access_token
 
 
-def get_current_doctor(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> Doctor:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired token",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_wallet(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> WalletIdentity:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Wallet access token required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     try:
-        payload = decode_access_token(token)
-        doctor_id = payload.get("sub")
-        if doctor_id is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
+        wallet_address = decode_access_token(credentials.credentials)
+    except WalletAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=exc.message,
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
 
-    doctor = get_doctor_by_id(db, int(doctor_id))
-    if doctor is None:
-        raise credentials_exception
-
-    return doctor
+    return WalletIdentity(wallet_address=wallet_address)

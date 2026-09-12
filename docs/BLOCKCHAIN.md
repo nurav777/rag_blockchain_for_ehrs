@@ -1,16 +1,12 @@
-# Blockchain
+# Blockchain model
 
-The blockchain stores only:
+`MedicalRecordRegistry` stores an immutable record reference:
 
-- Record Hash
-- Doctor ID
-- Hospital ID
-- Timestamp
+- SHA-256 `recordHash`
+- IPFS CID
+- authorized clinician wallet address
+- block timestamp
 
-Functions
+The contract also contains an allow-list of clinician wallets. The deployer/owner can authorize or revoke clinician wallets. Numeric application identities are not used.
 
-- registerRecord()
-- verifyRecord()
-- getRecord()
-
-Medical records remain off-chain.
+The prototype backend can relay registration after wallet authentication. The contract also exposes direct wallet registration for future clients that submit their own transaction.

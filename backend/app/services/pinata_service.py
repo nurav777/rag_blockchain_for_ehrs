@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -223,9 +224,18 @@ async def upload_pdf_to_pinata(
 
 async def download_from_ipfs(
     cid: str,
+    *,
+    max_attempts: int = 5,
+    initial_backoff_seconds: float = 2.0,
 ) -> bytes:
     """
     Download record bytes from the configured IPFS gateway.
+
+    Gateway lookup failures are often transient even when a CID is still
+    pinned.
+
+    Retry transient HTTP/network failures with exponential backoff so
+    callers such as the RAG reindexer can recover without re-uploading data.
     """
 
     normalized_cid = cid.strip()
@@ -233,6 +243,11 @@ async def download_from_ipfs(
     if not normalized_cid:
         raise PinataUploadError(
             "IPFS CID cannot be empty"
+        )
+
+    if max_attempts <= 0:
+        raise PinataUploadError(
+            "max_attempts must be greater than zero"
         )
 
     gateway_base = (
@@ -246,47 +261,124 @@ async def download_from_ipfs(
         f"{normalized_cid}"
     )
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=(
-                settings
-                .PINATA_UPLOAD_TIMEOUT
-            ),
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(
-                gateway_url
-            )
+    transient_statuses = {
+        408,
+        425,
+        429,
+        500,
+        502,
+        503,
+        504,
+    }
 
-    except httpx.TimeoutException as exc:
-        raise PinataUploadError(
-            "IPFS download timed out"
-        ) from exc
+    last_error: str | None = None
 
-    except httpx.HTTPError as exc:
-        raise PinataUploadError(
-            f"IPFS download failed: {exc}"
-        ) from exc
+    async with httpx.AsyncClient(
+        timeout=(
+            settings
+            .PINATA_UPLOAD_TIMEOUT
+        ),
+        follow_redirects=True,
+    ) as client:
 
-    if response.status_code != 200:
-        raise PinataUploadError(
-            (
-                "IPFS gateway returned status "
-                f"{response.status_code}: "
-                f"{response.text}"
-            )
+        for attempt in range(
+            1,
+            max_attempts + 1,
+        ):
+            try:
+                response = await client.get(
+                    gateway_url
+                )
+
+            except httpx.TimeoutException:
+                last_error = (
+                    "IPFS download timed out"
+                )
+
+            except httpx.HTTPError as exc:
+                last_error = (
+                    f"IPFS download failed: {exc}"
+                )
+
+            else:
+                if response.status_code == 200:
+                    content = response.content
+
+                    if not content:
+                        last_error = (
+                            "IPFS download returned "
+                            "empty content"
+                        )
+
+                    else:
+                        logger.info(
+                            (
+                                "Downloaded CID %s "
+                                "from IPFS on attempt %s"
+                            ),
+                            normalized_cid,
+                            attempt,
+                        )
+
+                        return content
+
+                else:
+                    body = response.text[:500]
+
+                    last_error = (
+                        "IPFS gateway returned status "
+                        f"{response.status_code}: "
+                        f"{body}"
+                    )
+
+                    #
+                    # 404 is deliberately retryable.
+                    #
+                    # Pinata can return a 404 when its
+                    # provider lookup times out even when
+                    # the CID remains pinned.
+                    #
+                    if (
+                        response.status_code < 500
+                        and response.status_code
+                        not in transient_statuses
+                        and response.status_code != 404
+                    ):
+                        raise PinataUploadError(
+                            last_error
+                        )
+
+            if attempt < max_attempts:
+                delay = (
+                    initial_backoff_seconds
+                    * (
+                        2
+                        ** (attempt - 1)
+                    )
+                )
+
+                logger.warning(
+                    (
+                        "IPFS retrieval attempt "
+                        "%s/%s failed for CID %s: "
+                        "%s. Retrying in %.1fs"
+                    ),
+                    attempt,
+                    max_attempts,
+                    normalized_cid,
+                    last_error,
+                    delay,
+                )
+
+                await asyncio.sleep(
+                    delay
+                )
+
+    raise PinataUploadError(
+        (
+            "IPFS retrieval failed after "
+            f"{max_attempts} attempts "
+            f"for CID {normalized_cid}: "
+            f"{last_error or 'unknown error'}"
         )
-
-    content = response.content
-
-    if not content:
-        raise PinataUploadError(
-            "IPFS download returned empty content"
-        )
-
-    logger.info(
-        "Downloaded CID %s from IPFS",
-        normalized_cid,
     )
-
-    return content

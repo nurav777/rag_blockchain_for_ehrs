@@ -1,27 +1,5 @@
-# Tables
+# Database
 
-Doctor
-- id
-- name
-- email
-- password
+The current architecture has no application relational database.
 
-Patient
-- id
-- name
-- age
-- gender
-
-MedicalRecord
-- id
-- patient_id
-- doctor_id
-- diagnosis
-- hash
-- file_path
-
-AuditLog
-- id
-- doctor_id
-- action
-- timestamp
+Identity is a verified Ethereum wallet address. Medical-record references are resolved from the Besu registry and record content is retrieved from IPFS. Chroma is only a semantic vector index and stores embeddings plus opaque record-hash/chunk metadata.

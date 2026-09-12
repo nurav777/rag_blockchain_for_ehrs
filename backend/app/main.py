@@ -2,8 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import init_db
-from app.routers import auth, patients, records, search, verify
+from app.routers import auth, records, search, verify
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -19,14 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-
-
-app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-app.include_router(patients.router, prefix="/api/patients", tags=["patients"])
+app.include_router(auth.router, prefix="/api/auth", tags=["wallet-auth"])
 app.include_router(records.router, prefix="/api/records", tags=["records"])
 app.include_router(search.router, prefix="/api/search", tags=["search"])
 app.include_router(verify.router, prefix="/api/verify", tags=["verify"])
@@ -36,6 +29,7 @@ app.include_router(verify.router, prefix="/api/verify", tags=["verify"])
 def root() -> dict[str, str]:
     return {
         "message": "Medical Records API",
+        "identity": "wallet",
         "docs": "/docs",
         "health": "/health",
     }

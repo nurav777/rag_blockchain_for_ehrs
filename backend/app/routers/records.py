@@ -1,22 +1,9 @@
-from fastapi import (
-    APIRouter,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    UploadFile,
-    status,
-)
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
-from app.database import get_db
-from app.dependencies.auth import get_current_doctor
-from app.models.doctor import Doctor
+from app.dependencies.auth import get_current_wallet
+from app.schemas.auth import WalletIdentity
 from app.schemas.record import MedicalRecordResponse
-from app.services.record_service import (
-    RecordUploadError,
-    upload_medical_record,
-)
+from app.services.record_service import RecordUploadError, upload_medical_record
 
 
 router = APIRouter()
@@ -28,35 +15,20 @@ router = APIRouter()
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_record(
-    patient_id: int = Form(..., gt=0),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_doctor: Doctor = Depends(get_current_doctor),
+    wallet: WalletIdentity = Depends(get_current_wallet),
 ) -> MedicalRecordResponse:
     """
-    Upload a medical record.
+    Upload a medical record using the authenticated clinician wallet.
 
-    Flow:
-        1. Authenticate doctor.
-        2. Resolve the patient.
-        3. Validate the PDF.
-        4. Calculate the record SHA-256 hash.
-        5. Upload the record to IPFS.
-        6. Register hash -> CID on the blockchain.
-        7. Index embeddings in ChromaDB.
-
-    The backend does not permanently store the uploaded PDF and does
-    not create a MedicalRecord row in SQLite.
+    There is no patient database lookup and no patient ID in the API.
+    The backend never needs a patient name to store or retrieve a record.
     """
-
     try:
         result = await upload_medical_record(
-            db=db,
-            doctor_id=current_doctor.id,
-            patient_id=patient_id,
+            uploader_wallet=wallet.wallet_address,
             file=file,
         )
-
     except RecordUploadError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -67,5 +39,6 @@ async def upload_record(
         record_hash=result.record_hash,
         ipfs_cid=result.ipfs_cid,
         tx_hash=result.tx_hash,
+        uploader_wallet=result.uploader_wallet,
         indexing_warning=result.indexing_warning,
     )

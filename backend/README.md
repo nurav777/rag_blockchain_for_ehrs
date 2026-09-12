@@ -1,31 +1,36 @@
 # Backend (FastAPI)
 
-Configuration and project structure only — business logic not implemented yet.
+Wallet-authenticated API for IPFS/Besu/Chroma medical-record retrieval.
 
-## Structure
+There is no SQLAlchemy/SQLite identity layer. Clinician identity comes from an Ethereum-compatible wallet signature and on-chain clinician authorization.
 
+## Main modules
+
+```text
+app/
+├── main.py
+├── config.py
+├── dependencies/auth.py
+├── routers/
+│   ├── auth.py
+│   ├── records.py
+│   ├── search.py
+│   └── verify.py
+├── schemas/
+│   ├── auth.py
+│   ├── record.py
+│   └── search.py
+└── services/
+    ├── auth_service.py
+    ├── blockchain_service.py
+    ├── pinata_service.py
+    ├── rag_service.py
+    └── record_service.py
 ```
-backend/
-├── requirements.txt
-└── app/
-    ├── main.py          # FastAPI app, CORS, router registration
-    ├── config.py        # Environment settings (Pydantic)
-    ├── database.py      # SQLAlchemy engine, session, Base
-    ├── routers/         # API route modules (empty routers)
-    ├── models/          # SQLAlchemy ORM models (to be added)
-    ├── schemas/         # Pydantic request/response schemas (to be added)
-    └── services/        # Business logic (to be added)
-```
 
-## Run (after installing dependencies)
+Run:
 
-From the `backend/` directory:
-
-```bash
+```powershell
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
-
-Health check: `GET http://127.0.0.1:8000/health`
-
-Copy `.env.example` from the project root to `.env` and adjust values as needed.

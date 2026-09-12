@@ -1,32 +1,15 @@
-# Project
+# Project architecture
 
-## Title
+Components:
 
-Blockchain-Based Secure Medical Record Storage and Retrieval using RAG
+- FastAPI API
+- Ethereum-wallet challenge/signature authentication
+- Hyperledger Besu QBFT consortium chain
+- Solidity medical-record registry
+- IPFS for content-addressed record retrieval
+- Pinata as prototype-only pinning infrastructure
+- ChromaDB for embeddings and opaque retrieval metadata
+- SentenceTransformers for embeddings
+- Ollama for local generation
 
-## Tech Stack
-
-Frontend
-- React
-- Tailwind CSS
-
-Backend
-- FastAPI
-- SQLite
-
-Blockchain
-- Hyperledger Besu
-- Solidity
-
-AI
-- ChromaDB
-- Sentence Transformers
-- Ollama
-
-## Modules
-
-- Doctor Login
-- Patient Management
-- Medical Record Upload
-- Blockchain Verification
-- AI Search
+The backend has no patient-management or password-account subsystem.

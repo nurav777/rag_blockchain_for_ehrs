@@ -1,15 +1,19 @@
-from app.schemas.auth import DoctorResponse, LoginRequest, TokenResponse
-from app.schemas.patient import PatientCreate, PatientResponse, PatientUpdate
+from app.schemas.auth import (
+    TokenResponse,
+    WalletChallengeRequest,
+    WalletChallengeResponse,
+    WalletIdentity,
+    WalletVerifyRequest,
+)
 from app.schemas.record import MedicalRecordResponse
 from app.schemas.search import Citation, SearchRequest, SearchResponse
 
 __all__ = [
-    "DoctorResponse",
-    "LoginRequest",
+    "WalletChallengeRequest",
+    "WalletChallengeResponse",
+    "WalletVerifyRequest",
+    "WalletIdentity",
     "TokenResponse",
-    "PatientCreate",
-    "PatientResponse",
-    "PatientUpdate",
     "MedicalRecordResponse",
     "Citation",
     "SearchRequest",

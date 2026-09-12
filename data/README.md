@@ -1,10 +1,8 @@
-# Runtime Data (local only)
+# Data directory
 
-This folder holds local development data. Contents are gitignored except `.gitkeep` markers.
+- `chromadb/` contains the local semantic vector index.
+- `demo_seed_manifest.json` contains demo bookkeeping for record hashes, CIDs and transaction references.
 
-| Subfolder | Purpose |
-|-----------|---------|
-| `uploads/` | Off-chain medical record files (PDF, text, etc.) |
-| `chromadb/` | ChromaDB vector store for RAG embeddings |
+The backend does not retain plaintext medical PDFs locally. The demo seeder creates a temporary PDF for upload and deletes it immediately afterward.
 
-SQLite database file (`medical_records.db`) is created at project root or under `data/` per backend config.
+There is no relational application database in the current architecture.

@@ -1,3 +1,3 @@
-from app.dependencies.auth import get_current_doctor, oauth2_scheme
+from app.dependencies.auth import bearer_scheme, get_current_wallet
 
-__all__ = ["get_current_doctor", "oauth2_scheme"]
+__all__ = ["bearer_scheme", "get_current_wallet"]

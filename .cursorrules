@@ -1,14 +1,7 @@
-We are building a blockchain-based medical record RAG system.
-
-Rules:
-
-- Build only one feature at a time.
-- Never generate more than one module.
-- Keep the code simple and modular.
-- Use FastAPI for backend.
-- Use React for frontend.
-- Use SQLite.
-- Use ChromaDB.
-- Use Hyperledger Besu.
-- Never store medical records on the blockchain.
-- Explain before making major architectural changes.
+- Backend: FastAPI + Web3.py.
+- Do not introduce SQLite/SQLAlchemy identity or record storage.
+- Identity is an Ethereum-compatible wallet verified by signature.
+- Do not add patient IDs or person-name metadata to API/storage layers.
+- IPFS is authoritative content storage; Pinata is prototype pinning only.
+- Besu stores record hash, CID, uploader wallet and timestamp.
+- Chroma stores embeddings plus record_hash/chunk_index only; no plaintext documents.

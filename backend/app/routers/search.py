@@ -1,23 +1,13 @@
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    status,
-)
+from fastapi import APIRouter, Depends
 
-from app.dependencies.auth import get_current_doctor
-from app.models.doctor import Doctor
-from app.schemas.search import (
-    SearchRequest,
-    SearchResponse,
-)
-from app.services.rag_service import (
-    RagError,
-    rag_service,
-)
+from app.dependencies.auth import get_current_wallet
+from app.schemas.search import Citation, SearchRequest, SearchResponse
+from app.services.rag_service import rag_service
 
 
-router = APIRouter()
+router = APIRouter(
+    tags=["search"],
+)
 
 
 @router.post(
@@ -26,42 +16,25 @@ router = APIRouter()
 )
 async def search_records(
     payload: SearchRequest,
-    _: Doctor = Depends(
-        get_current_doctor
-    ),
+    wallet_address: str = Depends(get_current_wallet),
 ) -> SearchResponse:
-    """
-    Search medical records semantically.
 
-    Retrieval path:
+    answer, retrieved_chunks = await rag_service.answer(
+        query=payload.query
+    )
 
-        query
-            -> query embedding
-            -> ChromaDB top-k
-            -> record_hash + chunk_index
-            -> blockchain
-            -> IPFS CID
-            -> IPFS record
-            -> relevant chunk
-            -> Ollama
-
-    SQLite is not involved in resolving medical records.
-    """
-
-    try:
-        answer, citations = (
-            await rag_service.search(
-                query=payload.query
-            )
+    citations = [
+        Citation(
+            record_hash=chunk.record_hash,
+            ipfs_cid=chunk.ipfs_cid,
+            chunk_index=chunk.chunk_index,
+            blockchain_verified=chunk.blockchain_verified,
+            score=chunk.score,
+            excerpt=chunk.excerpt,
+            source=chunk.source,
         )
-
-    except RagError as exc:
-        raise HTTPException(
-            status_code=(
-                status.HTTP_400_BAD_REQUEST
-            ),
-            detail=exc.message,
-        ) from exc
+        for chunk in retrieved_chunks
+    ]
 
     return SearchResponse(
         query=payload.query,

@@ -1,31 +1,15 @@
-# RAG Pipeline
+# RAG
 
-Doctor Query
+```text
+clinician query
+ -> query embedding
+ -> Chroma top-k
+ -> record_hash + chunk_index
+ -> Besu record registry
+ -> IPFS CID
+ -> IPFS PDF
+ -> deterministic chunk reconstruction
+ -> Ollama answer
+```
 
-↓
-
-Generate Embedding
-
-↓
-
-Search ChromaDB
-
-↓
-
-Top 5 Results
-
-↓
-
-Verify Blockchain
-
-↓
-
-Retrieve Records
-
-↓
-
-LLM
-
-↓
-
-Medical Summary
+Chroma does not persist PDF plaintext or person identity metadata.

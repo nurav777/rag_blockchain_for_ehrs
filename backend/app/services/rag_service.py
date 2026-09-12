@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import chromadb
@@ -23,7 +25,6 @@ from app.services.pinata_service import (
 
 logger = logging.getLogger(__name__)
 
-
 COLLECTION_NAME = "medical_records"
 
 DEFAULT_CHUNK_SIZE = 1200
@@ -36,10 +37,7 @@ DEFAULT_CHUNK_OVERLAP = 200
 
 
 class RagError(Exception):
-    def __init__(
-        self,
-        message: str,
-    ) -> None:
+    def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(message)
 
@@ -53,15 +51,10 @@ class RagError(Exception):
 class RetrievedChunk:
     record_hash: str
     ipfs_cid: str
-
     chunk_index: int
-
     score: float
-
     excerpt: str
-
     blockchain_verified: bool
-
     source: str
 
 
@@ -72,13 +65,8 @@ class RetrievedChunk:
 
 class RagService:
     def __init__(self) -> None:
-        self._embedding_model: (
-            SentenceTransformer | None
-        ) = None
-
-        self._chroma_client: (
-            chromadb.PersistentClient | None
-        ) = None
+        self._embedding_model: SentenceTransformer | None = None
+        self._chroma_client: chromadb.PersistentClient | None = None
 
     # ========================================================
     # INDEX RECORD
@@ -88,28 +76,20 @@ class RagService:
         self,
         record_hash: str,
         pdf_content: bytes,
-    ) -> None:
+    ) -> int:
         """
-        Index a medical record in ChromaDB.
+        Extract text from PDF and store embeddings in Chroma.
 
         Chroma stores:
+        - embedding
+        - record_hash
+        - chunk_index
 
-            embedding
-            record_hash
-            chunk_index
-
-        Chroma does NOT store:
-
-            PDF plaintext
-            patient identity
-            diagnosis
-            IPFS CID
+        Plaintext medical text is not stored in Chroma.
         """
 
-        normalized_hash = (
-            self._normalize_record_hash(
-                record_hash
-            )
+        normalized_hash = self._normalize_record_hash(
+            record_hash
         )
 
         text = self._extract_pdf_text(
@@ -118,10 +98,7 @@ class RagService:
 
         if not text:
             raise RagError(
-                (
-                    "No extractable text was "
-                    "found in the PDF"
-                )
+                "No extractable text found in PDF"
             )
 
         chunks = self._chunk_text(
@@ -130,65 +107,36 @@ class RagService:
 
         if not chunks:
             raise RagError(
-                (
-                    "PDF did not produce any "
-                    "indexable chunks"
-                )
+                "No chunks were generated from PDF"
             )
 
-        embeddings = self._encode_many(
-            chunks
-        )
+        model = self._get_embedding_model()
 
-        if len(embeddings) != len(chunks):
-            raise RagError(
-                (
-                    "Embedding count does not "
-                    "match chunk count"
-                )
-            )
+        embeddings = model.encode(
+            chunks,
+            convert_to_numpy=True,
+        ).tolist()
+
+        collection = self._get_collection()
 
         ids: list[str] = []
+        metadatas: list[dict[str, Any]] = []
 
-        metadatas: list[
-            dict[str, Any]
-        ] = []
-
-        for chunk_index in range(
-            len(chunks)
-        ):
+        for index in range(len(chunks)):
             ids.append(
                 self._build_chunk_id(
-                    record_hash=normalized_hash,
-                    chunk_index=chunk_index,
+                    normalized_hash,
+                    index,
                 )
             )
 
             metadatas.append(
                 {
-                    "record_hash": (
-                        normalized_hash
-                    ),
-                    "chunk_index": (
-                        chunk_index
-                    ),
+                    "record_hash": normalized_hash,
+                    "chunk_index": index,
                 }
             )
 
-        collection = (
-            self._get_collection()
-        )
-
-        #
-        # IMPORTANT:
-        #
-        # There is intentionally NO:
-        #
-        #     documents=...
-        #
-        # Plaintext medical text is not persisted
-        # in ChromaDB.
-        #
         collection.upsert(
             ids=ids,
             embeddings=embeddings,
@@ -196,13 +144,70 @@ class RagService:
         )
 
         logger.info(
-            (
-                "Indexed %s chunks for "
-                "medical record %s"
-            ),
+            "Indexed %s chunks for record %s",
             len(chunks),
             normalized_hash,
         )
+
+        return len(chunks)
+
+    # ========================================================
+    # CHECK IF RECORD ALREADY EXISTS
+    # ========================================================
+
+    def has_record(
+        self,
+        record_hash: str,
+    ) -> bool:
+        """
+        Return True if at least one Chroma chunk already exists
+        for the supplied record hash.
+        """
+
+        normalized_hash = self._normalize_record_hash(
+            record_hash
+        )
+
+        collection = self._get_collection()
+
+        try:
+            result = collection.get(
+                where={
+                    "record_hash": normalized_hash
+                },
+                limit=1,
+                include=["metadatas"],
+            )
+
+        except Exception as exc:
+            raise RagError(
+                f"Unable to inspect Chroma index: {exc}"
+            ) from exc
+
+        ids = result.get("ids")
+
+        return bool(ids)
+
+    # ========================================================
+    # CLEAR INDEX
+    # ========================================================
+
+    def clear_index(self) -> None:
+        """
+        Delete the Chroma collection.
+
+        Only intended for explicit full rebuilds.
+        """
+
+        client = self._get_chroma_client()
+
+        try:
+            client.delete_collection(
+                COLLECTION_NAME
+            )
+
+        except Exception:
+            pass
 
     # ========================================================
     # SEARCH
@@ -212,558 +217,176 @@ class RagService:
         self,
         query: str,
         top_k: int | None = None,
-    ) -> tuple[
-        str,
-        list[dict[str, Any]],
-    ]:
-        """
-        Semantic retrieval flow:
+    ) -> list[RetrievedChunk]:
 
-            query
-                ↓
-            query embedding
-                ↓
-            ChromaDB
-                ↓
-            record_hash + chunk_index
-                ↓
-            blockchain
-                ↓
-            IPFS CID
-                ↓
-            IPFS PDF
-                ↓
-            deterministic re-chunking
-                ↓
-            relevant plaintext chunk
-                ↓
-            Ollama
-        """
-
-        normalized_query = (
-            query.strip()
-        )
+        normalized_query = query.strip()
 
         if not normalized_query:
             raise RagError(
                 "Search query cannot be empty"
             )
 
-        requested_limit = (
+        limit = (
             top_k
             if top_k is not None
             else settings.RAG_TOP_K
         )
 
-        if requested_limit <= 0:
+        if limit <= 0:
             raise RagError(
-                (
-                    "top_k must be greater "
-                    "than zero"
-                )
+                "top_k must be greater than zero"
             )
 
-        collection = (
-            self._get_collection()
+        model = self._get_embedding_model()
+
+        query_embedding = model.encode(
+            [normalized_query],
+            convert_to_numpy=True,
+        )[0].tolist()
+
+        collection = self._get_collection()
+
+        count = collection.count()
+
+        if count == 0:
+            return []
+
+        result = collection.query(
+            query_embeddings=[
+                query_embedding
+            ],
+            n_results=min(
+                limit,
+                count,
+            ),
+            include=[
+                "metadatas",
+                "distances",
+            ],
         )
 
-        collection_size = (
-            collection.count()
+        metadata_rows = (
+            result.get("metadatas")
+            or [[]]
         )
 
-        if collection_size == 0:
-            return (
-                (
-                    "No indexed medical records "
-                    "are currently available."
-                ),
-                [],
-            )
-
-        limit = min(
-            requested_limit,
-            collection_size,
+        distance_rows = (
+            result.get("distances")
+            or [[]]
         )
 
-        query_embedding = (
-            self._encode(
-                normalized_query
-            )
+        if not metadata_rows:
+            return []
+
+        metadatas = (
+            metadata_rows[0]
+            or []
         )
 
-        try:
-            results = (
-                collection.query(
-                    query_embeddings=[
-                        query_embedding
-                    ],
-                    n_results=limit,
-                    include=[
-                        "metadatas",
-                        "distances",
-                    ],
-                )
-            )
-
-        except Exception as exc:
-            raise RagError(
-                (
-                    "ChromaDB search failed: "
-                    f"{exc}"
-                )
-            ) from exc
-
-        result_ids = results.get(
-            "ids"
+        distances = (
+            distance_rows[0]
+            if distance_rows
+            else []
         )
 
-        if (
-            not result_ids
-            or not result_ids[0]
+        retrieved: list[RetrievedChunk] = []
+
+        record_cache: dict[
+            str,
+            tuple[
+                str,
+                list[str],
+                bool,
+            ],
+        ] = {}
+
+        for position, metadata in enumerate(
+            metadatas
         ):
-            return (
-                (
-                    "No relevant medical records "
-                    "were found."
-                ),
-                [],
-            )
-
-        retrieved = (
-            await self._process_search_results(
-                results
-            )
-        )
-
-        if not retrieved:
-            return (
-                (
-                    "Relevant vector entries were "
-                    "found, but no corresponding "
-                    "blockchain-verified medical "
-                    "records could be retrieved."
-                ),
-                [],
-            )
-
-        context = (
-            self._build_context(
-                retrieved
-            )
-        )
-
-        answer = (
-            await self._generate_answer(
-                query=normalized_query,
-                context=context,
-            )
-        )
-
-        citations = [
-            self._to_citation(
-                item
-            )
-            for item in retrieved
-        ]
-
-        return (
-            answer,
-            citations,
-        )
-
-    # ========================================================
-    # PROCESS VECTOR RESULTS
-    # ========================================================
-
-    async def _process_search_results(
-        self,
-        results: dict[str, Any],
-    ) -> list[RetrievedChunk]:
-
-        retrieved: list[
-            RetrievedChunk
-        ] = []
-
-        ids = results.get(
-            "ids",
-            [[]],
-        )[0]
-
-        metadatas = results.get(
-            "metadatas",
-            [[]],
-        )[0]
-
-        distances = results.get(
-            "distances",
-            [[]],
-        )[0]
-
-        #
-        # Request-local caches only.
-        #
-        # These prevent repeated network/PDF work when multiple
-        # top-k chunks belong to the same medical record.
-        #
-
-        blockchain_cache: dict[
-            str,
-            dict[str, Any],
-        ] = {}
-
-        content_cache: dict[
-            str,
-            bytes,
-        ] = {}
-
-        chunks_cache: dict[
-            str,
-            list[str],
-        ] = {}
-
-        for result_position, result_id in enumerate(
-            ids
-        ):
-            if result_position >= len(
-                metadatas
-            ):
-                logger.warning(
-                    (
-                        "Chroma result %s is "
-                        "missing metadata"
-                    ),
-                    result_id,
-                )
-
-                continue
-
-            metadata = (
-                metadatas[
-                    result_position
-                ]
-            )
-
             if not metadata:
-                logger.warning(
-                    (
-                        "Chroma result %s has "
-                        "empty metadata"
-                    ),
-                    result_id,
-                )
-
                 continue
 
-            raw_hash = metadata.get(
-                "record_hash"
-            )
-
-            raw_chunk_index = (
+            record_hash = str(
                 metadata.get(
-                    "chunk_index"
+                    "record_hash",
+                    "",
                 )
-            )
+            ).strip()
 
-            if raw_hash is None:
-                logger.warning(
-                    (
-                        "Chroma result %s has no "
-                        "record_hash"
-                    ),
-                    result_id,
-                )
-
-                continue
-
-            if raw_chunk_index is None:
-                logger.warning(
-                    (
-                        "Chroma result %s has no "
-                        "chunk_index"
-                    ),
-                    result_id,
-                )
-
+            if not record_hash:
                 continue
 
             try:
-                record_hash = (
-                    self._normalize_record_hash(
-                        str(raw_hash)
+                chunk_index = int(
+                    metadata.get(
+                        "chunk_index",
+                        -1,
                     )
                 )
 
-                chunk_index = int(
-                    raw_chunk_index
-                )
-
             except (
-                RagError,
                 TypeError,
                 ValueError,
-            ) as exc:
-                logger.warning(
-                    (
-                        "Invalid Chroma metadata "
-                        "for %s: %s"
-                    ),
-                    result_id,
-                    exc,
-                )
-
+            ):
                 continue
 
             if chunk_index < 0:
                 continue
 
-            # ================================================
-            # Blockchain resolution
-            # ================================================
-
-            try:
-                if (
-                    record_hash
-                    in blockchain_cache
-                ):
-                    chain_record = (
-                        blockchain_cache[
-                            record_hash
-                        ]
-                    )
-
-                else:
-                    chain_record = (
-                        blockchain_service
-                        .get_record(
-                            record_hash
-                        )
-                    )
-
-                    blockchain_cache[
+            if record_hash not in record_cache:
+                try:
+                    (
+                        ipfs_cid,
+                        chunks,
+                        verified,
+                    ) = await self._retrieve_record_chunks(
                         record_hash
-                    ] = chain_record
-
-            except BlockchainError as exc:
-                logger.warning(
-                    (
-                        "Blockchain lookup failed "
-                        "for %s: %s"
-                    ),
-                    record_hash,
-                    exc.message,
-                )
-
-                continue
-
-            returned_hash = (
-                chain_record.get(
-                    "record_hash",
-                    "",
-                )
-            )
-
-            try:
-                returned_hash = (
-                    self._normalize_record_hash(
-                        str(returned_hash)
-                    )
-                )
-
-            except RagError:
-                logger.warning(
-                    (
-                        "Blockchain returned an "
-                        "invalid hash for %s"
-                    ),
-                    record_hash,
-                )
-
-                continue
-
-            if returned_hash != record_hash:
-                logger.warning(
-                    (
-                        "Blockchain hash mismatch "
-                        "for %s"
-                    ),
-                    record_hash,
-                )
-
-                continue
-
-            ipfs_cid = str(
-                chain_record.get(
-                    "ipfs_cid",
-                    "",
-                )
-            ).strip()
-
-            if not ipfs_cid:
-                logger.warning(
-                    (
-                        "Blockchain record %s "
-                        "contains no IPFS CID"
-                    ),
-                    record_hash,
-                )
-
-                continue
-
-            # ================================================
-            # IPFS retrieval
-            # ================================================
-
-            try:
-                if (
-                    ipfs_cid
-                    in content_cache
-                ):
-                    pdf_content = (
-                        content_cache[
-                            ipfs_cid
-                        ]
                     )
 
-                else:
-                    pdf_content = (
-                        await download_from_ipfs(
-                            ipfs_cid
-                        )
+                except (
+                    BlockchainError,
+                    PinataUploadError,
+                    RagError,
+                ) as exc:
+                    logger.warning(
+                        "Unable to retrieve record %s: %s",
+                        record_hash,
+                        exc,
                     )
 
-                    content_cache[
-                        ipfs_cid
-                    ] = pdf_content
+                    continue
 
-            except PinataUploadError as exc:
-                logger.warning(
-                    (
-                        "IPFS retrieval failed "
-                        "for %s: %s"
-                    ),
-                    record_hash,
-                    exc.message,
-                )
-
-                continue
-
-            except Exception as exc:
-                logger.warning(
-                    (
-                        "Unexpected IPFS retrieval "
-                        "error for %s: %s"
-                    ),
-                    record_hash,
-                    exc,
-                )
-
-                continue
-
-            # ================================================
-            # Recreate deterministic chunks
-            # ================================================
-
-            try:
-                if (
+                record_cache[
                     record_hash
-                    in chunks_cache
-                ):
-                    chunks = (
-                        chunks_cache[
-                            record_hash
-                        ]
-                    )
-
-                else:
-                    text = (
-                        self._extract_pdf_text(
-                            pdf_content
-                        )
-                    )
-
-                    if not text:
-                        logger.warning(
-                            (
-                                "Record %s contains "
-                                "no extractable text"
-                            ),
-                            record_hash,
-                        )
-
-                        continue
-
-                    chunks = (
-                        self._chunk_text(
-                            text
-                        )
-                    )
-
-                    chunks_cache[
-                        record_hash
-                    ] = chunks
-
-            except Exception as exc:
-                logger.warning(
-                    (
-                        "Unable to recreate "
-                        "chunks for %s: %s"
-                    ),
-                    record_hash,
-                    exc,
+                ] = (
+                    ipfs_cid,
+                    chunks,
+                    verified,
                 )
 
-                continue
+            (
+                ipfs_cid,
+                chunks,
+                verified,
+            ) = record_cache[
+                record_hash
+            ]
 
-            if chunk_index >= len(
-                chunks
-            ):
+            if chunk_index >= len(chunks):
                 logger.warning(
-                    (
-                        "Chunk index %s is outside "
-                        "record %s chunk range"
-                    ),
+                    "Chunk %s for record %s no longer exists",
                     chunk_index,
                     record_hash,
                 )
 
                 continue
 
-            excerpt = (
-                chunks[
-                    chunk_index
-                ].strip()
-            )
-
-            if not excerpt:
-                continue
-
-            # ================================================
-            # Similarity score
-            # ================================================
-
-            distance = 0.0
-
-            if (
-                result_position
-                < len(distances)
-            ):
-                try:
-                    distance = float(
-                        distances[
-                            result_position
-                        ]
-                    )
-
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    distance = 0.0
-
-            score = (
-                self._distance_to_score(
-                    distance
+            distance = (
+                float(
+                    distances[position]
                 )
+                if position < len(distances)
+                else 0.0
             )
 
             retrieved.append(
@@ -771,9 +394,13 @@ class RagService:
                     record_hash=record_hash,
                     ipfs_cid=ipfs_cid,
                     chunk_index=chunk_index,
-                    score=score,
-                    excerpt=excerpt,
-                    blockchain_verified=True,
+                    score=self._distance_to_score(
+                        distance
+                    ),
+                    excerpt=chunks[
+                        chunk_index
+                    ],
+                    blockchain_verified=verified,
                     source="ipfs",
                 )
             )
@@ -781,94 +408,167 @@ class RagService:
         return retrieved
 
     # ========================================================
-    # CONTEXT
+    # ANSWER
     # ========================================================
 
-    def _build_context(
+    async def answer(
         self,
-        retrieved: list[
-            RetrievedChunk
-        ],
-    ) -> str:
+        query: str,
+        top_k: int | None = None,
+    ) -> tuple[
+        str,
+        list[RetrievedChunk],
+    ]:
 
-        sections: list[str] = []
+        chunks = await self.search(
+            query=query,
+            top_k=top_k,
+        )
 
-        for item in retrieved:
-            section = "\n".join(
-                [
-                    (
-                        "[Medical record "
-                        f"{item.record_hash}]"
-                    ),
-                    (
-                        "Chunk index: "
-                        f"{item.chunk_index}"
-                    ),
-                    (
-                        "Blockchain verified: "
-                        f"{item.blockchain_verified}"
-                    ),
-                    "",
-                    item.excerpt,
-                ]
+        if not chunks:
+            return (
+                (
+                    "I could not find relevant "
+                    "medical-record evidence "
+                    "for that query."
+                ),
+                [],
             )
 
-            sections.append(
-                section
+        context_parts: list[str] = []
+
+        for index, chunk in enumerate(
+            chunks,
+            start=1,
+        ):
+            context_parts.append(
+                (
+                    f"[Source {index}]\n"
+                    f"Record hash: {chunk.record_hash}\n"
+                    f"IPFS CID: {chunk.ipfs_cid}\n"
+                    f"Chunk index: {chunk.chunk_index}\n"
+                    f"Blockchain verified: "
+                    f"{chunk.blockchain_verified}\n"
+                    f"Content:\n"
+                    f"{chunk.excerpt}"
+                )
             )
 
-        return "\n\n---\n\n".join(
-            sections
+        context = "\n\n".join(
+            context_parts
+        )
+
+        prompt = (
+            "You are a medical-record retrieval assistant.\n\n"
+            "Answer the user's question using only the "
+            "supplied record context.\n"
+            "Do not invent facts that are not present "
+            "in the context.\n"
+            "If the context is insufficient, say that "
+            "clearly.\n\n"
+            f"Question:\n{query}\n\n"
+            f"Context:\n{context}\n\n"
+            "Answer:"
+        )
+
+        answer = await self._call_ollama(
+            prompt
+        )
+
+        return (
+            answer,
+            chunks,
+        )
+
+    # ========================================================
+    # BLOCKCHAIN -> IPFS RECORD RETRIEVAL
+    # ========================================================
+
+    async def _retrieve_record_chunks(
+        self,
+        record_hash: str,
+    ) -> tuple[
+        str,
+        list[str],
+        bool,
+    ]:
+
+        record = blockchain_service.get_record(
+            record_hash
+        )
+
+        ipfs_cid = str(
+            record["ipfs_cid"]
+        ).strip()
+
+        if not ipfs_cid:
+            raise RagError(
+                "Blockchain record does not contain an IPFS CID"
+            )
+
+        verified = (
+            blockchain_service
+            .verify_record_hash(
+                record_hash
+            )
+        )
+
+        pdf_content = await download_from_ipfs(
+            ipfs_cid
+        )
+
+        text = self._extract_pdf_text(
+            pdf_content
+        )
+
+        if not text:
+            raise RagError(
+                "Unable to extract text from IPFS PDF"
+            )
+
+        chunks = self._chunk_text(
+            text
+        )
+
+        if not chunks:
+            raise RagError(
+                "No chunks could be reconstructed "
+                "from the IPFS record"
+            )
+
+        return (
+            ipfs_cid,
+            chunks,
+            verified,
         )
 
     # ========================================================
     # OLLAMA
     # ========================================================
 
-    async def _generate_answer(
+    async def _call_ollama(
         self,
-        query: str,
-        context: str,
+        prompt: str,
     ) -> str:
 
-        prompt = (
-            "You are a medical-record retrieval assistant.\n\n"
-            "Answer the doctor's question using ONLY the "
-            "provided blockchain-verified medical-record "
-            "context.\n\n"
-            "Do not invent information that does not appear "
-            "in the retrieved records.\n\n"
-            "If the records do not contain enough information, "
-            "say so clearly.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question:\n{query}\n\n"
-            "Answer:"
+        url = (
+            settings.OLLAMA_BASE_URL.rstrip("/")
+            + "/api/generate"
         )
 
         payload = {
-            "model": (
-                settings.OLLAMA_MODEL
-            ),
+            "model": settings.OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
         }
 
-        endpoint = (
-            f"{settings.OLLAMA_BASE_URL.rstrip('/')}"
-            "/api/generate"
-        )
-
         try:
             async with httpx.AsyncClient(
-                timeout=(
-                    settings.OLLAMA_TIMEOUT
-                )
+                timeout=settings.OLLAMA_TIMEOUT
             ) as client:
-                response = (
-                    await client.post(
-                        endpoint,
-                        json=payload,
-                    )
+                response = await client.post(
+                    url,
+                    json=payload,
                 )
 
         except httpx.TimeoutException as exc:
@@ -878,34 +578,28 @@ class RagService:
 
         except httpx.HTTPError as exc:
             raise RagError(
-                (
-                    "Ollama request failed: "
-                    f"{exc}"
-                )
+                f"Unable to communicate with Ollama: {exc}"
             ) from exc
 
         if response.status_code != 200:
             raise RagError(
                 (
-                    "Ollama returned HTTP "
+                    "Ollama returned status "
                     f"{response.status_code}: "
                     f"{response.text}"
                 )
             )
 
         try:
-            payload = response.json()
+            response_payload = response.json()
 
         except ValueError as exc:
             raise RagError(
-                (
-                    "Ollama returned an "
-                    "invalid JSON response"
-                )
+                "Ollama returned invalid JSON"
             ) from exc
 
         answer = str(
-            payload.get(
+            response_payload.get(
                 "response",
                 "",
             )
@@ -919,41 +613,7 @@ class RagService:
         return answer
 
     # ========================================================
-    # CITATION
-    # ========================================================
-
-    def _to_citation(
-        self,
-        item: RetrievedChunk,
-    ) -> dict[str, Any]:
-
-        return {
-            "record_hash": (
-                item.record_hash
-            ),
-            "ipfs_cid": (
-                item.ipfs_cid
-            ),
-            "chunk_index": (
-                item.chunk_index
-            ),
-            "blockchain_verified": (
-                item.blockchain_verified
-            ),
-            "score": round(
-                item.score,
-                4,
-            ),
-            "excerpt": (
-                item.excerpt
-            ),
-            "source": (
-                item.source
-            ),
-        }
-
-    # ========================================================
-    # EMBEDDINGS
+    # EMBEDDING MODEL
     # ========================================================
 
     def _get_embedding_model(
@@ -962,99 +622,36 @@ class RagService:
 
         if self._embedding_model is None:
             logger.info(
-                (
-                    "Loading embedding model: "
-                    "%s"
-                ),
+                "Loading embedding model: %s",
                 settings.EMBEDDING_MODEL,
             )
 
-            self._embedding_model = (
-                SentenceTransformer(
-                    settings.EMBEDDING_MODEL
-                )
+            self._embedding_model = SentenceTransformer(
+                settings.EMBEDDING_MODEL
             )
 
         return self._embedding_model
 
-    def _encode(
-        self,
-        text: str,
-    ) -> list[float]:
-
-        model = (
-            self._get_embedding_model()
-        )
-
-        embedding = (
-            model.encode(
-                text
-            )
-        )
-
-        return embedding.tolist()
-
-    def _encode_many(
-        self,
-        texts: list[str],
-    ) -> list[
-        list[float]
-    ]:
-
-        model = (
-            self._get_embedding_model()
-        )
-
-        embeddings = (
-            model.encode(
-                texts
-            )
-        )
-
-        return [
-            embedding.tolist()
-            for embedding
-            in embeddings
-        ]
-
     # ========================================================
-    # CHROMA
+    # CHROMA CLIENT
     # ========================================================
 
     def _get_chroma_client(
         self,
     ) -> chromadb.PersistentClient:
-        """
-        Initialize Chroma relative to PROJECT_ROOT.
-
-        Example:
-
-            CHROMA_PERSIST_DIR=./data/chromadb
-
-        always resolves to:
-
-            <project-root>/data/chromadb
-
-        rather than depending on the process working directory.
-        """
 
         if self._chroma_client is None:
-            persist_path = (
-                settings.resolve_project_path(
-                    settings.CHROMA_PERSIST_DIR
-                )
-            )
+            PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-            persist_path.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+            persist_path = Path(settings.CHROMA_PERSIST_DIR)
+
+            if not persist_path.is_absolute():
+                persist_path = PROJECT_ROOT / persist_path
+
+            persist_path.mkdir(parents=True, exist_ok=True)
 
             logger.info(
-                (
-                    "Using ChromaDB persistence "
-                    "directory: %s"
-                ),
+                "Using ChromaDB persistence directory: %s",
                 persist_path,
             )
 
@@ -1068,17 +665,11 @@ class RagService:
 
         return self._chroma_client
 
-    def _get_collection(
-        self,
-    ):
-        client = (
-            self._get_chroma_client()
-        )
+    def _get_collection(self):
+        client = self._get_chroma_client()
 
-        return (
-            client.get_or_create_collection(
-                name=COLLECTION_NAME
-            )
+        return client.get_or_create_collection(
+            name=COLLECTION_NAME
         )
 
     # ========================================================
@@ -1103,82 +694,99 @@ class RagService:
                 page_text = (
                     page.extract_text()
                     or ""
-                )
-
-                page_text = (
-                    page_text.strip()
-                )
+                ).strip()
 
                 if page_text:
                     pages.append(
                         page_text
                     )
 
-            return "\n\n".join(
+            extracted = "\n\n".join(
                 pages
             ).strip()
 
+            return self._redact_identity_lines(
+                extracted
+            )
+
         except Exception as exc:
             logger.warning(
-                (
-                    "PDF text extraction "
-                    "failed: %s"
-                ),
+                "PDF text extraction failed: %s",
                 exc,
             )
 
             return ""
 
     # ========================================================
-    # DETERMINISTIC CHUNKING
+    # LEGACY PATIENT NAME REDACTION
+    # ========================================================
+
+    def _redact_identity_lines(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Redact legacy synthetic Patient: name lines before
+        embedding or sending text to the LLM.
+
+        Replacement keeps the same character count so old
+        deterministic chunk positions remain stable.
+        """
+
+        pattern = re.compile(
+            r"(?im)^(\s*Patient\s*:\s*)([^\r\n]*)"
+        )
+
+        def replace(
+            match: re.Match[str],
+        ) -> str:
+            prefix = match.group(1)
+            value = match.group(2)
+
+            return (
+                prefix
+                + ("*" * len(value))
+            )
+
+        return pattern.sub(
+            replace,
+            text,
+        )
+
+    # ========================================================
+    # CHUNKING
     # ========================================================
 
     def _chunk_text(
         self,
         text: str,
-        chunk_size: int = (
-            DEFAULT_CHUNK_SIZE
-        ),
-        overlap: int = (
-            DEFAULT_CHUNK_OVERLAP
-        ),
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        overlap: int = DEFAULT_CHUNK_OVERLAP,
     ) -> list[str]:
 
-        normalized_text = (
-            text.strip()
-        )
+        normalized_text = text.strip()
 
         if not normalized_text:
             return []
 
         if chunk_size <= 0:
             raise RagError(
-                (
-                    "Chunk size must be "
-                    "greater than zero"
-                )
+                "Chunk size must be greater than zero"
             )
 
         if overlap < 0:
             raise RagError(
-                (
-                    "Chunk overlap cannot "
-                    "be negative"
-                )
+                "Chunk overlap cannot be negative"
             )
 
         if overlap >= chunk_size:
             raise RagError(
-                (
-                    "Chunk overlap must be "
-                    "smaller than chunk size"
-                )
+                "Chunk overlap must be smaller than chunk size"
             )
 
         chunks: list[str] = []
 
         start = 0
-
         text_length = len(
             normalized_text
         )
@@ -1194,11 +802,9 @@ class RagService:
                 text_length,
             )
 
-            chunk = (
-                normalized_text[
-                    start:end
-                ].strip()
-            )
+            chunk = normalized_text[
+                start:end
+            ].strip()
 
             if chunk:
                 chunks.append(
@@ -1213,7 +819,7 @@ class RagService:
         return chunks
 
     # ========================================================
-    # CHUNK IDENTIFIER
+    # CHUNK ID
     # ========================================================
 
     def _build_chunk_id(
@@ -1228,7 +834,7 @@ class RagService:
         )
 
     # ========================================================
-    # RECORD HASH
+    # HASH NORMALIZATION
     # ========================================================
 
     def _normalize_record_hash(
@@ -1245,10 +851,8 @@ class RagService:
 
         if len(normalized) != 64:
             raise RagError(
-                (
-                    "Record hash must be a "
-                    "64-character SHA-256 hash"
-                )
+                "Record hash must be a "
+                "64-character SHA-256 hash"
             )
 
         try:
@@ -1258,17 +862,14 @@ class RagService:
 
         except ValueError as exc:
             raise RagError(
-                (
-                    "Record hash contains "
-                    "invalid hexadecimal "
-                    "characters"
-                )
+                "Record hash contains invalid "
+                "hexadecimal characters"
             ) from exc
 
         return normalized
 
     # ========================================================
-    # DISTANCE → DISPLAY SCORE
+    # DISTANCE -> SCORE
     # ========================================================
 
     def _distance_to_score(
@@ -1287,5 +888,9 @@ class RagService:
             )
         )
 
+
+# ============================================================
+# SHARED SERVICE INSTANCE
+# ============================================================
 
 rag_service = RagService()
